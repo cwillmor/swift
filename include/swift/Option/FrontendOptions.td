@@ -228,6 +228,10 @@ def enable_omit_needless_words :
   Flag<["-"], "enable-omit-needless-words">,
   HelpText<"Omit needless words when importing Objective-C names">;
 
+def enable_import_objc_generics :
+  Flag<["-"], "enable-import-objc-generics">,
+  HelpText<"Import Objective-C lightweight generic type params">;
+
 def enable_strip_ns_prefix :
   Flag<["-"], "enable-strip-ns-prefix">,
   HelpText<"Strip 'NS' prefix from Foundation entities">;

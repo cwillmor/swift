@@ -949,7 +949,7 @@ getThunkedForeignFunctionRef(SILGenFunction &gen,
   // Produce a class_method when thunking imported ObjC methods.
   } else if (foreignCI.SILFnType->getRepresentation()
         == SILFunctionTypeRepresentation::ObjCMethod) {
-    assert(subs.empty());
+//    assert(subs.empty());
     SILValue thisArg = args.back().getValue();
 
     return gen.B.createClassMethod(loc, thisArg, foreign,
@@ -1033,40 +1033,48 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
       }
     };
 
-    for (unsigned nativeParamIndex : indices(params)) {
-      // Bring the parameter to +1.
-      auto paramValue = params[nativeParamIndex];
-      auto thunkParam = nativeFnTy->getParameters()[nativeParamIndex];
-      // TODO: Could avoid a retain if the bridged parameter is also +0 and
-      // doesn't require a bridging conversion.
-      ManagedValue param;
-      switch (thunkParam.getConvention()) {
-      case ParameterConvention::Direct_Owned:
-        param = emitManagedRValueWithCleanup(paramValue);
-        break;
-      case ParameterConvention::Direct_Guaranteed:
-      case ParameterConvention::Direct_Unowned:
-        param = emitManagedRetain(fd, paramValue);
-        break;
-      case ParameterConvention::Direct_Deallocating:
-        param = ManagedValue::forUnmanaged(paramValue);
-        break;
-      case ParameterConvention::Indirect_Inout:
-      case ParameterConvention::Indirect_InoutAliasable:
-        param = ManagedValue::forUnmanaged(paramValue);
-        break;
-      case ParameterConvention::Indirect_In:
-      case ParameterConvention::Indirect_In_Guaranteed:
-        llvm_unreachable("indirect args in foreign thunked method not implemented");
+    {
+      GenericContextScope genericScope(SGM.Types,
+                                       foreignFnTy->getGenericSignature());
+
+      for (unsigned nativeParamIndex : indices(params)) {
+        // Bring the parameter to +1.
+        auto paramValue = params[nativeParamIndex];
+        auto thunkParam = nativeFnTy->getParameters()[nativeParamIndex];
+        // TODO: Could avoid a retain if the bridged parameter is also +0 and
+        // doesn't require a bridging conversion.
+        ManagedValue param;
+        switch (thunkParam.getConvention()) {
+        case ParameterConvention::Direct_Owned:
+          param = emitManagedRValueWithCleanup(paramValue);
+          break;
+        case ParameterConvention::Direct_Guaranteed:
+        case ParameterConvention::Direct_Unowned:
+          param = emitManagedRetain(fd, paramValue);
+          break;
+        case ParameterConvention::Direct_Deallocating:
+          param = ManagedValue::forUnmanaged(paramValue);
+          break;
+        case ParameterConvention::Indirect_Inout:
+        case ParameterConvention::Indirect_InoutAliasable:
+          param = ManagedValue::forUnmanaged(paramValue);
+          break;
+        case ParameterConvention::Indirect_In:
+        case ParameterConvention::Indirect_In_Guaranteed:
+          llvm_unreachable("indirect args in foreign thunked method not implemented");
+        }
+
+        maybeAddForeignErrorArg();
+
+        SILType foreignArgTy =
+          foreignFnTy->getParameters()[foreignArgIndex++].getSILType();
+        CanType foreignArgValueTy = foreignArgTy.getSwiftRValueType();
+        foreignArgValueTy =
+            CanType(ArchetypeBuilder::mapTypeIntoContext(fd, foreignArgValueTy));
+        args.push_back(emitNativeToBridgedValue(fd, param,
+                                  SILFunctionTypeRepresentation::CFunctionPointer,
+                                  foreignArgValueTy));
       }
-
-      maybeAddForeignErrorArg();
-
-      SILType foreignArgTy =
-        foreignFnTy->getParameters()[foreignArgIndex++].getSILType();
-      args.push_back(emitNativeToBridgedValue(fd, param,
-                                SILFunctionTypeRepresentation::CFunctionPointer,
-                                foreignArgTy.getSwiftRValueType()));
     }
 
     maybeAddForeignErrorArg();
@@ -1079,10 +1087,14 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
     auto fnType = fn->getType().castTo<SILFunctionType>();
     fnType = fnType->substGenericArgs(SGM.M, SGM.SwiftModule, subs);
 
+    CanType substResultTy{
+        ArchetypeBuilder::mapTypeIntoContext(fd, nativeFormalResultTy)};
+
     result = emitApply(fd, ManagedValue::forUnmanaged(fn),
                        subs, args, fnType,
-                       AbstractionPattern(nativeFormalResultTy),
-                       nativeFormalResultTy,
+                       AbstractionPattern(nativeFnTy->getGenericSignature(),
+                                          nativeFormalResultTy),
+                       substResultTy,
                        ApplyOptions::None, None, foreignError,
                        SGFContext())
       .forwardAsSingleValue(*this, fd);

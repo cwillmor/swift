@@ -1075,7 +1075,8 @@ static llvm::Value *emitGenericMetadataAccessFunction(IRGenFunction &IGF,
 static llvm::Value *emitMetadataAccessFunction(IRGenFunction &IGF,
                                                CanType type) {
   if (auto nominal = type->getAnyNominal()) {
-    if (nominal->isGenericContext()) {
+    if (nominal->isGenericContext() &&
+        !(isa<ClassDecl>(nominal) && nominal->getClangNode())) {
       // This is a metadata accessor for a fully substituted generic type.
       assert(!type->hasArchetype() &&
              "partially substituted types do not have accessors");
@@ -1100,8 +1101,6 @@ static llvm::Value *emitMetadataAccessFunction(IRGenFunction &IGF,
       // Classes that might not have Swift metadata use a different
       // symbol name.
       if (!hasKnownSwiftMetadata(IGF.IGM, classDecl)) {
-        assert(!classDecl->isGenericContext() &&
-               "ObjC class cannot be generic");
         return emitObjCMetadataRef(IGF, classDecl);
       }
 

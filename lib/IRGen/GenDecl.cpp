@@ -1915,8 +1915,7 @@ getTypeEntityInfo(IRGenModule &IGM, CanType conformingType) {
     entity = LinkEntity::forNominalTypeDescriptor(nom);
     defaultTy = IGM.NominalTypeDescriptorTy;
     defaultPtrTy = IGM.NominalTypeDescriptorPtrTy;
-  } else if (auto ct = dyn_cast<ClassType>(conformingType)) {
-    auto clas = ct->getDecl();
+  } else if (auto clas = conformingType->getClassOrBoundGenericClass()) {
     if (clas->isForeign()) {
       typeKind = TypeMetadataRecordKind::NonuniqueDirectType;
       entity = LinkEntity::forForeignTypeMetadataCandidate(conformingType);

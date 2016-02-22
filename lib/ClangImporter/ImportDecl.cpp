@@ -2930,10 +2930,17 @@ namespace {
       // Add the implicit 'self' parameter patterns.
       SmallVector<ParameterList *, 4> bodyParams;
       auto selfVar =
-        ParamDecl::createSelf(SourceLoc(), dc,
-                              /*isStatic*/
-                              decl->isClassMethod() || forceClassMethod);
+        ParamDecl::createSelf(SourceLoc(), dc, /*isStatic*/!isInstance);
       bodyParams.push_back(ParameterList::createWithoutLoc(selfVar));
+      Type selfInterfaceType;
+      if (dc->getAsProtocolOrProtocolExtensionContext()) {
+        selfInterfaceType = dc->getProtocolSelf()->getArchetype();
+      } else {
+        selfInterfaceType = dc->getDeclaredInterfaceType();
+      }
+      if (!isInstance) {
+        selfInterfaceType = MetatypeType::get(selfInterfaceType);
+      }
 
       SpecialMethodKind kind = SpecialMethodKind::Regular;
       // FIXME: This doesn't handle implicit properties.
@@ -2946,7 +2953,8 @@ namespace {
       DeclName name = importedName.Imported;
       Optional<ForeignErrorConvention> errorConvention;
       bodyParams.push_back(nullptr);
-      auto type = Impl.importMethodType(decl,
+      auto type = Impl.importMethodType(dc,
+                                        decl,
                                         decl->getReturnType(),
                                         { decl->param_begin(),
                                           decl->param_size() },
@@ -2988,7 +2996,7 @@ namespace {
         resultTy = result->getDynamicSelf();
         assert(resultTy && "failed to get dynamic self");
 
-        Type interfaceSelfTy = result->getDynamicSelfInterface();
+        Type dynamicSelfTy = result->getDynamicSelfInterface();
         OptionalTypeKind nullability = OTK_ImplicitlyUnwrappedOptional;
         if (auto typeNullability = decl->getReturnType()->getNullability(
                                      Impl.getClangASTContext())) {
@@ -2997,7 +3005,7 @@ namespace {
         }
         if (nullability != OTK_None && !errorConvention.hasValue()) {
           resultTy = OptionalType::get(nullability, resultTy);
-          interfaceSelfTy = OptionalType::get(nullability, interfaceSelfTy);
+          dynamicSelfTy = OptionalType::get(nullability, dynamicSelfTy);
         }
 
         // Update the method type with the new result type.
@@ -3006,17 +3014,21 @@ namespace {
                                  methodTy->getExtInfo());
 
         // Create the interface type of the method.
-        interfaceType = FunctionType::get(methodTy->getInput(), interfaceSelfTy,
+        interfaceType = FunctionType::get(methodTy->getInput(), dynamicSelfTy,
                                           methodTy->getExtInfo());
         interfaceType = FunctionType::get(selfVar->getType(), interfaceType);
       }
 
       // Add the 'self' parameter to the function type.
-      type = FunctionType::get(selfVar->getType(), type);
+      type = FunctionType::get(selfInterfaceType, type);
 
       if (auto proto = dyn_cast<ProtocolDecl>(dc)) {
         std::tie(type, interfaceType)
           = getProtocolMethodType(proto, type->castTo<AnyFunctionType>());
+      } else if (dc->getGenericParamsOfContext()) {
+        std::tie(type, interfaceType)
+          = getGenericMethodType(dc, type->castTo<AnyFunctionType>());
+        selfVar->overwriteType(type->castTo<AnyFunctionType>()->getInput());
       }
 
       result->setBodyResultType(resultTy);
@@ -3294,7 +3306,7 @@ namespace {
       redundant = false;
 
       // Figure out the type of the container.
-      auto containerTy = dc->getDeclaredTypeOfContext();
+      auto containerTy = dc->getDeclaredTypeInContext();
       assert(containerTy && "Method in non-type context?");
       auto nominalOwner = containerTy->getAnyNominal();
 
@@ -3330,14 +3342,16 @@ namespace {
       // Add the implicit 'self' parameter patterns.
       SmallVector<ParameterList*, 4> bodyParams;
       auto selfMetaVar = ParamDecl::createSelf(SourceLoc(), dc, /*static*/true);
-      auto selfTy = selfMetaVar->getType()->castTo<MetatypeType>()->getInstanceType();
+      auto selfTy = dc->getDeclaredTypeInContext();
+      auto selfMetaTy = MetatypeType::get(selfTy);
       bodyParams.push_back(ParameterList::createWithoutLoc(selfMetaVar));
 
       // Import the type that this method will have.
       Optional<ForeignErrorConvention> errorConvention;
       DeclName name = importedName.Imported;
       bodyParams.push_back(nullptr);
-      auto type = Impl.importMethodType(objcMethod,
+      auto type = Impl.importMethodType(dc,
+                                        objcMethod,
                                         objcMethod->getReturnType(),
                                         args,
                                         variadic,
@@ -3365,7 +3379,7 @@ namespace {
                                oldFnType->getExtInfo());
 
       // Add the 'self' parameter to the function types.
-      Type allocType = FunctionType::get(selfMetaVar->getType(), type);
+      Type allocType = FunctionType::get(selfMetaTy, type);
       Type initType = FunctionType::get(selfTy, type);
 
       // Look for other imported constructors that occur in this context with
@@ -3469,6 +3483,17 @@ namespace {
 
         result->setInitializerInterfaceType(interfaceInitType);
         result->setInterfaceType(interfaceAllocType);
+      } else if (dc->getGenericParamsOfContext()) {
+        Type interfaceAllocType;
+        Type interfaceInitType;
+        std::tie(allocType, interfaceAllocType)
+          = getGenericMethodType(dc, allocType->castTo<AnyFunctionType>());
+        std::tie(initType, interfaceInitType)
+          = getGenericMethodType(dc, initType->castTo<AnyFunctionType>());
+
+        result->setInitializerInterfaceType(interfaceInitType);
+        result->setInterfaceType(interfaceAllocType);
+        selfVar->overwriteType(initType->castTo<AnyFunctionType>()->getInput());
       }
 
       result->setType(allocType);
@@ -3591,6 +3616,26 @@ namespace {
       return { type, interfaceType };
     }
 
+    /// Retrieves the type and interface type for a generic class or class
+    /// extension method, given the computed type of that method.
+    std::pair<Type, Type> getGenericMethodType(DeclContext *dc,
+                                               AnyFunctionType *fnType) {
+      Type inputType = fnType->getInput();
+      Type interfaceInputType =
+        ArchetypeBuilder::mapTypeOutOfContext(dc, inputType);
+      Type resultType = fnType->getResult();
+      Type interfaceResultType =
+        ArchetypeBuilder::mapTypeOutOfContext(dc, resultType);
+
+      Type interfaceType = GenericFunctionType::get(
+          dc->getGenericSignatureOfContext(), interfaceInputType,
+          interfaceResultType, AnyFunctionType::ExtInfo());
+      Type type = PolymorphicFunctionType::get(inputType, resultType,
+                                               dc->getGenericParamsOfContext());
+      return { type, interfaceType };
+    }
+
+
     /// Build a declaration for an Objective-C subscript getter.
     FuncDecl *buildSubscriptGetterDecl(const FuncDecl *getter, Type elementTy,
                                        DeclContext *dc, ParamDecl *index) {
@@ -3611,6 +3656,11 @@ namespace {
       if (dc->getAsProtocolOrProtocolExtensionContext()) {
         std::tie(getterType, interfaceType)
           = getProtocolMethodType(dc, getterType->castTo<AnyFunctionType>());
+      } else if (dc->getGenericParamsOfContext()) {
+        std::tie(getterType, interfaceType)
+          = getGenericMethodType(dc, getterType->castTo<AnyFunctionType>());
+        getterArgs[0]->get(0)->overwriteType(
+            getterType->castTo<AnyFunctionType>()->getInput());
       }
 
       // Create the getter thunk.
@@ -3676,6 +3726,11 @@ namespace {
       if (dc->getAsProtocolOrProtocolExtensionContext()) {
         std::tie(setterType, interfaceType)
           = getProtocolMethodType(dc, setterType->castTo<AnyFunctionType>());
+      } else if (dc->getGenericParamsOfContext()) {
+        std::tie(setterType, interfaceType)
+          = getGenericMethodType(dc, setterType->castTo<AnyFunctionType>());
+        selfDecl->overwriteType(
+            setterType->castTo<AnyFunctionType>()->getInput());
       }
 
       // Create the setter thunk.
@@ -3696,14 +3751,22 @@ namespace {
       return thunk;
     }
     
-    /// Retrieve the element type and of a subscript setter.
+    /// Retrieve the element interface type and key param decl of a subscript
+    /// setter.
     std::pair<Type, ParamDecl *>
     decomposeSubscriptSetter(FuncDecl *setter) {
       auto *PL = setter->getParameterList(1);
       if (PL->size() != 2)
         return { nullptr, nullptr };
 
-      return { PL->get(0)->getType(), PL->get(1) };
+      // Setter type is (self) -> (elem_type, key_type) -> ()
+      Type elementType =
+        setter->getInterfaceType()->castTo<AnyFunctionType>()->getResult()
+        ->castTo<AnyFunctionType>()->getInput()
+        ->castTo<TupleType>()->getElementType(0);
+      ParamDecl *keyDecl = PL->get(1);
+      
+      return { elementType, keyDecl };
     }
 
     /// Rectify the (possibly different) types determined by the
@@ -3909,7 +3972,7 @@ namespace {
       // the implicit 'self' parameter and the normal function
       // parameters.
       auto elementTy
-        = getter->getType()->castTo<AnyFunctionType>()->getResult()
+        = getter->getInterfaceType()->castTo<AnyFunctionType>()->getResult()
             ->castTo<AnyFunctionType>()->getResult();
 
       // Local function to mark the setter unavailable.
@@ -3932,6 +3995,8 @@ namespace {
              ->getAsNominalTypeOrNominalTypeExtensionContext()
            == setter->getDeclContext()
                ->getAsNominalTypeOrNominalTypeExtensionContext());
+        // TODO: Possible that getter and setter are different instantiations
+        // of the same objc generic type?
 
         // Whether we can update the types involved in the subscript
         // operation.
@@ -4019,7 +4084,7 @@ namespace {
                               SourceLoc());
       auto indicesType = bodyParams->getType(context);
       
-      subscript->setType(FunctionType::get(indicesType, elementTy));
+      subscript->setType(FunctionType::get(indicesType, elementTy)); // TODO: no good when generics are around
       addObjCAttribute(subscript, None);
 
       // Optional subscripts in protocols.
@@ -4122,7 +4187,7 @@ namespace {
         // FIXME: Build a superclass conformance if the superclass
         // conforms.
         auto conformance
-          = ctx.getConformance(dc->getDeclaredTypeOfContext(),
+          = ctx.getConformance(dc->getDeclaredTypeInContext(),
                                protocols[i], SourceLoc(),
                                dc,
                                ProtocolConformanceState::Incomplete);
@@ -4139,6 +4204,114 @@ namespace {
         auto ext = cast<ExtensionDecl>(decl);
         ext->setConformanceLoader(&Impl, id);
       }
+    }
+
+    // Returns None on error. Returns nullptr if there is no type param list to
+    // import or we suppress its import, as in the case of NSArray, NSSet, and
+    // NSDictionary.
+    Optional<GenericParamList *> importObjCGenericParams(
+       const clang::ObjCInterfaceDecl *decl, DeclContext *dc)
+    {
+      if (!Impl.SwiftContext.LangOpts.ImportObjCGenerics) {
+        return nullptr;
+      }
+      auto typeParamList = decl->getTypeParamList();
+      if (!typeParamList) {
+        return nullptr;
+      }
+      if (Impl.shouldSuppressGenericParamsImport(decl)) {
+        return nullptr;
+      }
+      assert(typeParamList->size() > 0);
+      SmallVector<GenericTypeParamDecl *, 4> genericParams;
+      for (auto *objcGenericParam : *typeParamList) {
+        auto genericParamDecl =
+          Impl.createDeclWithClangNode<GenericTypeParamDecl>(objcGenericParam,
+              dc, Impl.SwiftContext.getIdentifier(objcGenericParam->getName()),
+              Impl.importSourceLoc(objcGenericParam->getLocation()),
+              /*depth*/0, /*index*/genericParams.size());
+        // NOTE: depth is always 0 for ObjC generic type arguments, since only
+        // classes may have generic types in ObjC, and ObjC classes cannot be
+        // nested.
+
+        // Import parameter constraints.
+        SmallVector<TypeLoc, 1> inherited;
+        if (objcGenericParam->hasExplicitBound()) {
+          assert(!objcGenericParam->getUnderlyingType().isNull());
+          auto clangBound =
+            objcGenericParam->getUnderlyingType()
+            ->castAs<clang::ObjCObjectPointerType>();
+          if (clangBound->getInterfaceDecl()) {
+            auto unqualifiedClangBound =
+              clangBound->stripObjCKindOfTypeAndQuals(
+                  Impl.getClangASTContext());
+            Type superclassType = Impl.importType(
+                clang::QualType(unqualifiedClangBound, 0),
+                ImportTypeKind::Abstract, false, false);
+            if (!superclassType) {
+              return None;
+            }
+            inherited.push_back(TypeLoc::withoutLoc(superclassType));
+          }
+          for (clang::ObjCProtocolDecl *clangProto : clangBound->quals()) {
+            ProtocolDecl *proto =
+              cast_or_null<ProtocolDecl>(Impl.importDecl(clangProto));
+            if (!proto) {
+              return None;
+            }
+            inherited.push_back(TypeLoc::withoutLoc(proto->getDeclaredType()));
+          }
+        }
+        if (inherited.empty()) {
+          auto anyObjectProto =
+            Impl.SwiftContext.getProtocol(KnownProtocolKind::AnyObject);
+          if (!anyObjectProto) {
+            return None;
+          }
+          inherited.push_back(
+            TypeLoc::withoutLoc(anyObjectProto->getDeclaredType()));
+        }
+        genericParamDecl->setInherited(
+            Impl.SwiftContext.AllocateCopy(inherited));
+
+        genericParams.push_back(genericParamDecl);
+      }
+      return GenericParamList::create(Impl.SwiftContext,
+            Impl.importSourceLoc(typeParamList->getLAngleLoc()),
+            genericParams,
+            Impl.importSourceLoc(typeParamList->getRAngleLoc()));
+    }
+
+    // Calculate the generic signature for the given imported generic param
+    // list. If there are any errors in doing so, return 'nullptr'.
+    GenericSignature *calculateGenericSignature(GenericParamList *genericParams,
+                                                DeclContext *dc) {
+      ArchetypeBuilder builder(*dc->getParentModule(), Impl.SwiftContext.Diags);
+      for (auto param : *genericParams) {
+        if (builder.addGenericParameter(param)) {
+          return nullptr;
+        }
+      }
+      for (auto param : *genericParams) {
+        if (builder.addGenericParameterRequirements(param)) {
+          return nullptr;
+        }
+      }
+      // TODO: any need to infer requirements?
+      if (builder.finalize(genericParams->getSourceRange().Start)) {
+        return nullptr;
+      }
+      SmallVector<GenericTypeParamType *, 4> genericParamTypes;
+      for (auto param : *genericParams) {
+        genericParamTypes.push_back(
+            param->getDeclaredType()->castTo<GenericTypeParamType>());
+        auto *archetype = builder.getArchetype(param);
+        param->setArchetype(archetype);
+      }
+      genericParams->setAllArchetypes(
+          Impl.SwiftContext.AllocateCopy(builder.getAllArchetypes()));
+
+      return builder.getGenericSignature(genericParamTypes);
     }
 
     /// Import members of the given Objective-C container and add them to the
@@ -4442,12 +4615,47 @@ namespace {
       if (!dc)
         return nullptr;
 
-      // Create the extension declaration and record it.
       auto loc = Impl.importSourceLoc(decl->getLocStart());
       auto result = ExtensionDecl::create(
                       Impl.SwiftContext, loc,
                       TypeLoc::withoutLoc(objcClass->getDeclaredType()),
                       { }, dc, nullptr, decl);
+
+      // Determine the type and generic args of the extension.
+      if (objcClass->getGenericParams()) {
+        // Clone generic parameters.
+        SmallVector<GenericTypeParamDecl *, 2> toGenericParams;
+        for (auto fromGP : *objcClass->getGenericParams()) {
+          // Create the new generic parameter.
+          auto toGP = new (Impl.SwiftContext) GenericTypeParamDecl(
+              result, fromGP->getName(), SourceLoc(), fromGP->getDepth(),
+              fromGP->getIndex());
+          toGP->setImplicit(true);
+          toGP->setInherited(
+              Impl.SwiftContext.AllocateCopy(fromGP->getInherited()));
+          // Record new generic parameter.
+          toGenericParams.push_back(toGP);
+        }
+
+        auto genericParams = GenericParamList::create(Impl.SwiftContext,
+            SourceLoc(), toGenericParams, SourceLoc());
+        result->setGenericParams(genericParams);
+        if (auto sig = calculateGenericSignature(genericParams, result)) {
+          result->setGenericSignature(sig);
+        } else {
+          return nullptr;
+        }
+        // Calculate the correct bound-generic extended type.
+        SmallVector<Type, 2> genericArgs;
+        for (auto gp : *genericParams) {
+          genericArgs.push_back(gp->getArchetype());
+        }
+        Type extendedType =
+          BoundGenericClassType::get(objcClass, nullptr, genericArgs);
+        result->getExtendedTypeLoc().setType(extendedType);
+      }
+
+      // Create the extension declaration and record it.
       objcClass->addExtension(result);
       Impl.ImportedDecls[decl->getCanonicalDecl()] = result;
       SmallVector<TypeLoc, 4> inheritedTypes;
@@ -4721,7 +4929,24 @@ namespace {
                                 name,
                                 Impl.importSourceLoc(decl->getLocation()),
                                 None, nullptr, dc);
+
+      // Import generic arguments, if any.
+      if (auto gpImportResult = importObjCGenericParams(decl, dc)) {
+        auto genericParams = *gpImportResult;
+        if (genericParams) {
+          result->setGenericParams(genericParams);
+          if (auto sig = calculateGenericSignature(genericParams, result)) {
+            result->setGenericSignature(sig);
+          } else {
+            return nullptr;
+          }
+        }
+      } else {
+        return nullptr;
+      }
+
       result->computeType();
+
       Impl.ImportedDecls[decl->getCanonicalDecl()] = result;
       result->setCircularityCheck(CircularityCheck::Checked);
       result->setAddedImplicitInitializers();
@@ -4733,12 +4958,16 @@ namespace {
       // If this Objective-C class has a supertype, import it.
       SmallVector<TypeLoc, 4> inheritedTypes;
       Type superclassType;
-      if (auto objcSuper = decl->getSuperClass()) {
-        auto super = cast_or_null<ClassDecl>(Impl.importDecl(objcSuper));
-        if (!super)
-          return nullptr;
-
-        superclassType = super->getDeclaredType();
+      if (decl->getSuperClass()) {
+        auto clangSuperclassType =
+          Impl.getClangASTContext().getObjCObjectPointerType(
+              clang::QualType(decl->getSuperClassType(), 0));
+        superclassType = Impl.importType(clangSuperclassType,
+                                         ImportTypeKind::Abstract,
+                                         isInSystemModule(dc),
+                                         /*isFullyBridgeable*/false);
+        assert(superclassType->is<ClassType>() ||
+               superclassType->is<BoundGenericClassType>());
         inheritedTypes.push_back(TypeLoc::withoutLoc(superclassType));
       }
       result->setSuperclass(superclassType);
@@ -4790,7 +5019,7 @@ namespace {
       Type ty = prop->getType();
       if (auto innerTy = ty->getAnyOptionalObjectType())
         ty = innerTy;
-      if (!ty->isAnyClassReferenceType())
+      if (!ty->is<GenericTypeParamType>() && !ty->isAnyClassReferenceType())
         return;
 
       ASTContext &ctx = prop->getASTContext();
@@ -4927,6 +5156,7 @@ namespace {
           /*static*/ false, /*IsLet*/ false,
           Impl.importSourceLoc(decl->getLocation()),
           name, type, dc);
+      result->setInterfaceType(ArchetypeBuilder::mapTypeOutOfContext(dc, type));
       
       // Turn this into a computed property.
       // FIXME: Fake locations for '{' and '}'?
