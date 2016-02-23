@@ -230,6 +230,9 @@ bool FulfillmentMap::searchBoundGenericTypeMetadata(ModuleDecl &M,
                                                     unsigned source,
                                                     MetadataPath &&path,
                                          const InterestingKeysCallback &keys) {
+  if (type->getDecl()->hasClangNode())
+    return false;
+
   auto params = type->getDecl()->getGenericParams()->getAllArchetypes();
   auto substitutions = type->getSubstitutions(&M, nullptr);
   assert(params.size() >= substitutions.size() &&
