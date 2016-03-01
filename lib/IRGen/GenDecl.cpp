@@ -16,7 +16,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/AST/ASTContext.h"
-#include "swift/AST/Attr.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsIRGen.h"
@@ -2026,6 +2025,9 @@ llvm::Constant *IRGenModule::emitProtocolConformances() {
   case llvm::Triple::ELF:
     sectionName = ".swift2_protocol_conformances";
     break;
+  case llvm::Triple::COFF:
+    sectionName = ".sw2prtc";
+    break;
   default:
     llvm_unreachable("Don't know how to emit protocol conformances for "
                      "the selected object format.");
@@ -2106,6 +2108,9 @@ llvm::Constant *IRGenModule::emitTypeMetadataRecords() {
     break;
   case llvm::Triple::ELF:
     sectionName = ".swift2_type_metadata";
+    break;
+  case llvm::Triple::COFF:
+    sectionName = ".sw2tymd";
     break;
   default:
     llvm_unreachable("Don't know how to emit type metadata table for "

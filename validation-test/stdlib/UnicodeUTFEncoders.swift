@@ -77,8 +77,8 @@ func nthUnicodeScalar(n: UInt32) -> UnicodeScalar {
 func nsEncode<CodeUnit>(
   c: UInt32,
   _ encoding: NSStringEncoding,
-  inout _ buffer: [CodeUnit],
-  inout _ used: Int
+  _ buffer: inout [CodeUnit],
+  _ used: inout Int
 ) {
   var c = c
   _precondition(buffer.count >= 4, "buffer is not large enough")
@@ -116,7 +116,8 @@ class CodecTest<Codec : TestableUnicodeCodec> {
     let nsEncoded = nsEncodeBuffer[0..<(used/sizeof(CodeUnit.self))]
     var encodeIndex = encodeBuffer.startIndex
     let encodeOutput: (CodeUnit) -> Void = {
-      self.encodeBuffer[encodeIndex++] = $0
+      self.encodeBuffer[encodeIndex] = $0
+      encodeIndex += 1
     }
 
     var g = nsEncoded.generate()

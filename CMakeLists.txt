@@ -247,7 +247,6 @@ include(CheckCXXSourceRuns)
 include(CMakeParseArguments)
 include(SwiftTranslateFlag)
 include(SwiftHandleGybSources)
-include(SwiftHandleDTraceSources)
 include(SwiftSetIfArchBitness)
 include(AddSwift)
 include(SwiftConfigureSDK)
@@ -455,6 +454,19 @@ elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
 
   set(SWIFT_PRIMARY_VARIANT_SDK_default "FREEBSD")
   set(SWIFT_PRIMARY_VARIANT_ARCH_default "x86_64")
+elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "CYGWIN")
+  configure_sdk_unix(CYGWIN "Cygwin" "windows" "cygwin" "x86_64" "x86_64-unknown-windows-cygnus")
+
+#  set(CMAKE_EXECUTABLE_FORMAT "ELF")
+
+  set(SWIFT_HOST_VARIANT "windows" CACHE STRING
+      "Deployment OS for Swift host tools (the compiler) [windows].")
+
+  set(SWIFT_HOST_VARIANT_SDK "CYGWIN")
+  set(SWIFT_HOST_VARIANT_ARCH "x86_64")
+  
+  set(SWIFT_PRIMARY_VARIANT_SDK_default "CYGWIN")
+  set(SWIFT_PRIMARY_VARIANT_ARCH_default "x86_64")
 elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
   # Set defaults.
 
@@ -626,7 +638,6 @@ message(STATUS "  Assertions: ${SWIFT_STDLIB_ASSERTIONS}")
 message(STATUS "")
 
 message(STATUS "Building Swift runtime with:")
-message(STATUS "  Dtrace:                             ${SWIFT_RUNTIME_ENABLE_DTRACE}")
 message(STATUS "  Leak Detection Checker Entrypoints: ${SWIFT_RUNTIME_ENABLE_LEAK_CHECKER}")
 message(STATUS "")
 

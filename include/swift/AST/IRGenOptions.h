@@ -64,6 +64,9 @@ public:
   /// The compilation directory for the debug info.
   std::string DebugCompilationDir;
 
+  /// The DWARF version of debug info.
+  unsigned DWARFVersion;
+
   /// The command line string that is to be stored in the DWARF debug info.
   std::string DWARFDebugFlags;
 
@@ -142,6 +145,13 @@ public:
   /// List of backend command-line options for -embed-bitcode.
   std::vector<uint8_t> CmdArgs;
 
+  /// Should we try to build incrementally by not emitting an object file if it
+  /// has the same IR hash as the module that we are preparing to emit?
+  ///
+  /// This is a debugging option meant to make it easier to perform compile time
+  /// measurements on a non-clean build directory.
+  unsigned UseIncrementalLLVMCodeGen : 1;
+
   IRGenOptions() : OutputKind(IRGenOutputKind::LLVMAssembly), Verify(true),
                    Optimize(false), DebugInfoKind(IRGenDebugInfoKind::None),
                    UseJIT(false), DisableLLVMOptzns(false),
@@ -150,7 +160,8 @@ public:
                    EmitStackPromotionChecks(false), GenerateProfile(false),
                    PrintInlineTree(false), EmbedMode(IRGenEmbedMode::None),
                    HasValueNamesSetting(false), ValueNames(false),
-                   StripReflectionNames(true), StripReflectionMetadata(true)
+                   StripReflectionNames(true), StripReflectionMetadata(true),
+                   CmdArgs(), UseIncrementalLLVMCodeGen(true)
                    {}
 
   /// Gets the name of the specified output filename.
